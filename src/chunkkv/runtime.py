@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from chunkkv.engine.mlx_engine import BlendConfig, MLXEngine, Placement, PrefillResult
+from chunkkv.engine.base import BlendConfig, Placement, PrefillResult
 from chunkkv.gate.gate import ReuseGate
 from chunkkv.store.keys import LookupKey, token_hash
 from chunkkv.store.kvstore import Entry, KVStore
@@ -30,7 +30,7 @@ class Outcome:
 class ChunkReuseRuntime:
     def __init__(
         self,
-        engine: MLXEngine,
+        engine,
         model_id: str,
         store: KVStore,
         gate: ReuseGate,
@@ -96,7 +96,7 @@ class ChunkReuseRuntime:
 class PrefixCacheRuntime:
     """Longest-exact-prefix reuse over previously prefilled requests."""
 
-    def __init__(self, engine: MLXEngine, budget_bytes: int = 4 << 30):
+    def __init__(self, engine, budget_bytes: int = 4 << 30):
         self.engine = engine
         self.budget = budget_bytes
         self._seqs: OrderedDict[int, tuple[list[int], PrefillResult]] = OrderedDict()

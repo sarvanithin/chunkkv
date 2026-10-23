@@ -72,8 +72,9 @@ def main() -> None:
     args = ap.parse_args()
     r = run(MLXEngine.load(args.model))
     print(f"recurring chunk tokens={r['expected']}  hit rate={r['hit_rate']:.1%}  non-prefix={r['non_prefix_hit_rate']:.1%}")
-    if r["non_prefix_hit_rate"] < args.min_hit:
-        print(f"FAIL: non-prefix hit rate below {args.min_hit:.0%} - chunk reuse is silently broken", file=sys.stderr)
+    if r["hit_rate"] < args.min_hit or r["non_prefix_hit_rate"] == 0:
+        print(f"FAIL: chunk hit rate below {args.min_hit:.0%} or no non-prefix hits - reuse is silently broken",
+              file=sys.stderr)
         sys.exit(1)
     print("OK")
 

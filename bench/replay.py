@@ -13,10 +13,9 @@ import json
 import time
 from pathlib import Path
 
-import mlx.core as mx
+import numpy as np
 
 from bench.policies import POLICIES, build
-from chunkkv.engine.mlx_engine import MLXEngine
 from chunkkv.proxy.chunker import Chunker
 
 
@@ -32,12 +31,10 @@ def run_policy(policy, engine, chunker, reqs, model_id, args, ref):
         req = chunker.chunk(r["messages"], r["tenant"], r.get("agent"))
         t0 = time.perf_counter()
         out = rt.prefill(req)
-        logits = out.result.logits[-1].astype(mx.float32)
-        mx.eval(logits)
+        logp = engine.last_logprobs(out.result)  # forces the prefill to finish
         ttft = time.perf_counter() - t0
         gen = engine.generate(out.result, args.max_new)
         text = engine.tokenizer.decode(gen)
-        logp = logits - mx.logsumexp(logits)
         row = {
             "id": r["id"], "policy": policy, "tokens": len(req.tokens), "ttft": ttft,
             "compute": out.stats["prefill_token_equiv"] / len(req.tokens),
@@ -55,7 +52,7 @@ def run_policy(policy, engine, chunker, reqs, model_id, args, ref):
             ref[r["id"]] = (logp, gen)
         else:
             p0_logp, p0_gen = ref[r["id"]]
-            row["kl"] = mx.sum(mx.exp(p0_logp) * (p0_logp - logp)).item()
+            row["kl"] = float(np.sum(np.exp(p0_logp) * (p0_logp - logp)))
             row["match_p0"] = gen == p0_gen
             n = 0
             for a, b in zip(gen, p0_gen):
@@ -66,13 +63,14 @@ def run_policy(policy, engine, chunker, reqs, model_id, args, ref):
         rows.append(row)
         del out
     del rt
-    mx.clear_cache()
+    engine.clear_cache()
     return rows
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="mlx-community/Qwen2.5-7B-Instruct-4bit")
+    ap.add_argument("--backend", default="mlx", choices=["mlx", "torch"])
+    ap.add_argument("--model", default=None)
     ap.add_argument("--workloads", nargs="+", default=["multiagent", "rag", "compaction", "agent", "attack"])
     ap.add_argument("--policies", nargs="+", default=POLICIES)
     ap.add_argument("--limit", type=int, default=None)
@@ -83,11 +81,20 @@ def main() -> None:
     ap.add_argument("--tag", default="dev")
     args = ap.parse_args()
 
-    engine = MLXEngine.load(args.model)
+    if args.backend == "torch":
+        from chunkkv.engine.torch_engine import TorchEngine
+
+        args.model = args.model or "Qwen/Qwen2.5-7B-Instruct"
+        engine = TorchEngine.load(args.model)
+    else:
+        from chunkkv.engine.mlx_engine import MLXEngine
+
+        args.model = args.model or "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        engine = MLXEngine.load(args.model)
     chunker = Chunker(engine.tokenizer)
     model_id = args.model.split("/")[-1]
     warm = chunker.chunk([{"role": "user", "content": "warm up " * 200}], "w")
-    mx.eval(engine.prefill(warm.tokens).logits)
+    engine.last_logprobs(engine.prefill(warm.tokens))
 
     out_dir = Path("runs") / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)

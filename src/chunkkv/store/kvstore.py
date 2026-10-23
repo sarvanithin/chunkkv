@@ -10,7 +10,7 @@ import itertools
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from chunkkv.engine.mlx_engine import ChunkKV
+from chunkkv.engine.base import ChunkKV
 from chunkkv.store.keys import LookupKey
 from chunkkv.types import TrustLevel
 

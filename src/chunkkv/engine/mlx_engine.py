@@ -19,61 +19,11 @@ SwiGLU MLP, standard RoPE) are supported in v0.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 import mlx.core as mx
+import numpy as np
 
+from chunkkv.engine.base import BlendConfig, ChunkKV, Placement, PrefillResult  # noqa: F401
 from chunkkv.scheduler.rerope import RopeSpec, apply_rope, shift_keys
-
-
-@dataclass
-class ChunkKV:
-    """Per-layer K/V for one chunk, as computed at positions start..start+len."""
-
-    keys: list[mx.array]  # each (1, n_kv_heads, L, head_dim), RoPE applied
-    values: list[mx.array]
-    start: int
-
-    @property
-    def length(self) -> int:
-        return self.keys[0].shape[2]
-
-
-@dataclass
-class Placement:
-    """A cached chunk placed at a new offset in the request."""
-
-    chunk: ChunkKV
-    start: int
-    ratio: float | None = None  # per-chunk recompute budget; None = config default
-    exact: bool = False  # computed after exactly the same prefix: never recomputed, not even at layer 0
-
-
-@dataclass
-class BlendConfig:
-    recompute_ratio: float = 0.15  # fraction of cached tokens recomputed at layers >= 1
-    n_sink: int = 2  # first tokens of each chunk always recomputed
-    full_first_layer: bool = True  # False = naive reuse (no repair at all)
-    # Deviation probe: if a chunk's relative layer-1 K/V deviation exceeds this,
-    # recompute the whole chunk from layer 1 on. None disables the probe.
-    escalate_threshold: float | None = None
-
-
-@dataclass
-class PrefillResult:
-    logits: mx.array  # (n_active_last, vocab) for the positions in `logit_positions`
-    logit_positions: mx.array
-    keys: list[mx.array]  # full K per layer for the whole request (1, H, N, D)
-    values: list[mx.array]
-    stats: dict = field(default_factory=dict)
-
-    def chunk(self, start: int, end: int) -> ChunkKV:
-        return ChunkKV(
-            # Copy, so a stored chunk does not pin the whole request's buffers.
-            keys=[mx.contiguous(k[:, :, start:end, :]) for k in self.keys],
-            values=[mx.contiguous(v[:, :, start:end, :]) for v in self.values],
-            start=start,
-        )
 
 
 class MLXEngine:
@@ -256,4 +206,14 @@ class MLXEngine:
             "prefill_token_equiv": (layer0 + rest) / n_layers,
             "chunks": chunk_stats,
         }
-        return PrefillResult(logits, mx.arange(logits_from, N), keys_out, values_out, stats)
+        return PrefillResult(logits, mx.arange(logits_from, N), keys_out, values_out, stats, copy=mx.contiguous)
+
+    # -- backend-neutral helpers used by the bench --------------------------
+
+    def last_logprobs(self, result: PrefillResult) -> np.ndarray:
+        logits = result.logits[-1].astype(mx.float32)
+        logp = logits - mx.logsumexp(logits)
+        return np.array(logp)
+
+    def clear_cache(self) -> None:
+        mx.clear_cache()
