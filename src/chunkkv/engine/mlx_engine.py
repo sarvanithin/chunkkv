@@ -45,6 +45,7 @@ class Placement:
 
     chunk: ChunkKV
     start: int
+    ratio: float | None = None  # per-chunk recompute budget; None = config default
 
 
 @dataclass
@@ -52,6 +53,9 @@ class BlendConfig:
     recompute_ratio: float = 0.15  # fraction of cached tokens recomputed at layers >= 1
     n_sink: int = 2  # first tokens of each chunk always recomputed
     full_first_layer: bool = True  # False = naive reuse (no repair at all)
+    # Deviation probe: if a chunk's relative layer-1 K/V deviation exceeds this,
+    # recompute the whole chunk from layer 1 on. None disables the probe.
+    escalate_threshold: float | None = None
 
 
 @dataclass
@@ -158,6 +162,7 @@ class MLXEngine:
         h = emb[:, active, :]
         keys_out, values_out = [], []
         selected_cached = 0
+        chunk_stats: list[dict] = []
 
         for li, layer in enumerate(self.layers):
             attn = layer.self_attn
@@ -166,15 +171,27 @@ class MLXEngine:
             K, V = base_kv(li, k, v)
 
             if li == 1 and placements and config.full_first_layer:
-                # Select the cached tokens whose fresh layer-1 K/V deviate most.
-                dev = mx.sum((k - K[:, :, active, :]).astype(mx.float32) ** 2, axis=(0, 1, 3))
-                dev = dev + mx.sum((v - V[:, :, active, :]).astype(mx.float32) ** 2, axis=(0, 1, 3))
-                n_cached = sum(cached_np)
-                budget = int(round(config.recompute_ratio * n_cached))
+                # Each chunk contributes a token budget; escalated chunks are recomputed
+                # whole, and the pooled budget goes to the most-deviating tokens of the rest.
+                diff = mx.sum((k - K[:, :, active, :]).astype(mx.float32) ** 2, axis=(0, 1, 3))
+                diff = diff + mx.sum((v - V[:, :, active, :]).astype(mx.float32) ** 2, axis=(0, 1, 3))
+                norm = mx.sum(k.astype(mx.float32) ** 2, axis=(0, 1, 3)) + mx.sum(v.astype(mx.float32) ** 2, axis=(0, 1, 3))
                 keep = (~cached) | sink
+                pool = mx.zeros((N,), dtype=mx.bool_)
+                budget = 0
+                for p in placements:
+                    end = p.start + p.chunk.length
+                    rel = (mx.sum(diff[p.start : end]) / mx.sum(norm[p.start : end])).item()
+                    ratio = config.recompute_ratio if p.ratio is None else p.ratio
+                    escalated = config.escalate_threshold is not None and rel > config.escalate_threshold
+                    if escalated:
+                        keep[p.start : end] = True
+                    elif ratio > 0:
+                        pool[p.start : end] = True
+                        budget += int(round(ratio * p.chunk.length))
+                    chunk_stats.append({"start": p.start, "length": p.chunk.length, "rel_dev": rel, "escalated": escalated})
                 if budget > 0:
-                    dev_c = mx.where(cached & ~sink, dev, -1.0)
-                    top = mx.argsort(-dev_c)[:budget]
+                    top = mx.argsort(-mx.where(pool & ~keep, diff, -1.0))[:budget]
                     keep[top] = True
                 keep_list = [i for i, kk in enumerate(keep.tolist()) if kk]
                 selected_cached = sum(1 for i in keep_list if cached_np[i])
@@ -203,5 +220,6 @@ class MLXEngine:
             "recomputed_cached_tokens": selected_cached,
             # token-layer units, normalised so a full prefill == N
             "prefill_token_equiv": (layer0 + rest) / n_layers,
+            "chunks": chunk_stats,
         }
         return PrefillResult(logits, mx.arange(logits_from, N), keys_out, values_out, stats)

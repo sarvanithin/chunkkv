@@ -4,3 +4,6 @@ __pycache__/
 .pytest_cache/
 .env
 runs/
+build/
+dist/
+*.egg-info
