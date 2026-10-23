@@ -22,12 +22,13 @@ class TorchEngine:
         self.inner = model.model
         self.layers = self.inner.layers
         cfg = model.config
-        if getattr(cfg, "rope_scaling", None):
+        scaling = getattr(cfg, "rope_scaling", None) or {}
+        if scaling.get("rope_type", scaling.get("type", "default")) != "default":
             raise NotImplementedError("rope_scaling is not supported in v0")
         self.n_heads = cfg.num_attention_heads
         self.n_kv = cfg.num_key_value_heads
         self.head_dim = getattr(cfg, "head_dim", None) or cfg.hidden_size // cfg.num_attention_heads
-        base = getattr(cfg, "rope_theta", None) or cfg.rope_parameters["rope_theta"]
+        base = getattr(cfg, "rope_theta", None) or scaling.get("rope_theta") or cfg.rope_parameters["rope_theta"]
         self.device = next(model.parameters()).device
         self.inv_freq = base ** (-torch.arange(0, self.head_dim, 2, device=self.device, dtype=torch.float32) / self.head_dim)
         eos = model.generation_config.eos_token_id
@@ -37,7 +38,7 @@ class TorchEngine:
     def load(cls, repo: str, dtype=torch.bfloat16) -> "TorchEngine":
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        model = AutoModelForCausalLM.from_pretrained(repo, dtype=dtype, device_map="cuda")
+        model = AutoModelForCausalLM.from_pretrained(repo, dtype=dtype).to("cuda")
         return cls(model, AutoTokenizer.from_pretrained(repo))
 
     # -- helpers ---------------------------------------------------------
