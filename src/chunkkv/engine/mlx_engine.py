@@ -46,6 +46,7 @@ class Placement:
     chunk: ChunkKV
     start: int
     ratio: float | None = None  # per-chunk recompute budget; None = config default
+    exact: bool = False  # computed after exactly the same prefix: never recomputed, not even at layer 0
 
 
 @dataclass
@@ -68,8 +69,9 @@ class PrefillResult:
 
     def chunk(self, start: int, end: int) -> ChunkKV:
         return ChunkKV(
-            keys=[k[:, :, start:end, :] for k in self.keys],
-            values=[v[:, :, start:end, :] for v in self.values],
+            # Copy, so a stored chunk does not pin the whole request's buffers.
+            keys=[mx.contiguous(k[:, :, start:end, :]) for k in self.keys],
+            values=[mx.contiguous(v[:, :, start:end, :]) for v in self.values],
             start=start,
         )
 
@@ -114,6 +116,25 @@ class MLXEngine:
             return self.inner.embed_tokens.as_linear(h)
         return self.model.lm_head(h)
 
+    def generate(self, result: "PrefillResult", max_tokens: int = 32) -> list[int]:
+        """Greedy decode continuing from a prefill (uses its last-position logits and K/V)."""
+        from mlx_lm.models.cache import KVCache
+
+        n = result.keys[0].shape[2]
+        cache = []
+        for K, V in zip(result.keys, result.values):
+            c = KVCache()
+            c.state = (K, V, n)
+            cache.append(c)
+        eos = set(self.tokenizer.eos_token_ids)
+        out: list[int] = []
+        nxt = int(mx.argmax(result.logits[-1]).item())
+        while len(out) < max_tokens and nxt not in eos:
+            out.append(nxt)
+            logits = self.model(mx.array([[nxt]]), cache=cache)
+            nxt = int(mx.argmax(logits[0, -1]).item())
+        return out
+
     # -- main entry ------------------------------------------------------
 
     def prefill(
@@ -134,16 +155,21 @@ class MLXEngine:
         logits_from = N - 1 if logits_from is None else logits_from
 
         cached = mx.zeros((N,), dtype=mx.bool_)
+        exact = mx.zeros((N,), dtype=mx.bool_)
         sink = mx.zeros((N,), dtype=mx.bool_)
         idx = mx.arange(N)
         for p in placements:
             end = p.start + p.chunk.length
             span = (idx >= p.start) & (idx < end)
             cached = cached | span
-            sink = sink | (span & (idx < p.start + config.n_sink))
+            if p.exact:
+                exact = exact | span
+            else:
+                sink = sink | (span & (idx < p.start + config.n_sink))
         cached_np = [bool(c) for c in cached.tolist()]
+        exact_np = [bool(c) for c in exact.tolist()]
         fresh_idx = mx.array([i for i in range(N) if not cached_np[i]], dtype=mx.int32)
-        all_idx = mx.arange(N, dtype=mx.int32)
+        layer0_idx = mx.array([i for i in range(N) if not exact_np[i]], dtype=mx.int32)
 
         # Base K/V per layer: cached chunks moved to their new offsets.
         def base_kv(layer_i: int, like_k: mx.array, like_v: mx.array):
@@ -158,7 +184,7 @@ class MLXEngine:
             return K, V
 
         emb = self.inner.embed_tokens(mx.array(tokens)[None])
-        active = all_idx if (config.full_first_layer or not placements) else fresh_idx
+        active = layer0_idx if config.full_first_layer else fresh_idx
         h = emb[:, active, :]
         keys_out, values_out = [], []
         selected_cached = 0
@@ -173,13 +199,20 @@ class MLXEngine:
             if li == 1 and placements and config.full_first_layer:
                 # Each chunk contributes a token budget; escalated chunks are recomputed
                 # whole, and the pooled budget goes to the most-deviating tokens of the rest.
-                diff = mx.sum((k - K[:, :, active, :]).astype(mx.float32) ** 2, axis=(0, 1, 3))
-                diff = diff + mx.sum((v - V[:, :, active, :]).astype(mx.float32) ** 2, axis=(0, 1, 3))
-                norm = mx.sum(k.astype(mx.float32) ** 2, axis=(0, 1, 3)) + mx.sum(v.astype(mx.float32) ** 2, axis=(0, 1, 3))
+                # diff/norm are indexed by absolute position; exact chunks stay at zero.
+                d_act = mx.sum((k - K[:, :, active, :]).astype(mx.float32) ** 2, axis=(0, 1, 3))
+                d_act = d_act + mx.sum((v - V[:, :, active, :]).astype(mx.float32) ** 2, axis=(0, 1, 3))
+                n_act = mx.sum(k.astype(mx.float32) ** 2, axis=(0, 1, 3)) + mx.sum(v.astype(mx.float32) ** 2, axis=(0, 1, 3))
+                diff = mx.zeros((N,), dtype=mx.float32)
+                norm = mx.zeros((N,), dtype=mx.float32)
+                diff[active] = d_act
+                norm[active] = n_act
                 keep = (~cached) | sink
                 pool = mx.zeros((N,), dtype=mx.bool_)
                 budget = 0
                 for p in placements:
+                    if p.exact:
+                        continue
                     end = p.start + p.chunk.length
                     rel = (mx.sum(diff[p.start : end]) / mx.sum(norm[p.start : end])).item()
                     ratio = config.recompute_ratio if p.ratio is None else p.ratio
@@ -195,9 +228,10 @@ class MLXEngine:
                     keep[top] = True
                 keep_list = [i for i, kk in enumerate(keep.tolist()) if kk]
                 selected_cached = sum(1 for i in keep_list if cached_np[i])
-                sel = mx.array(keep_list, dtype=mx.int32)
+                local = {pos: j for j, pos in enumerate(active.tolist())}
+                sel = mx.array([local[i] for i in keep_list], dtype=mx.int32)
                 h, q, k, v, x = h[:, sel], q[:, :, sel], k[:, :, sel], v[:, :, sel], x[:, sel]
-                active = sel
+                active = mx.array(keep_list, dtype=mx.int32)
 
             K[:, :, active, :] = k
             V[:, :, active, :] = v
@@ -212,7 +246,7 @@ class MLXEngine:
         logits = self._logits(h[:, mx.array(want, dtype=mx.int32)])[0]
 
         n_cached = sum(cached_np)
-        layer0 = N if (config.full_first_layer or not placements) else N - n_cached
+        layer0 = len(layer0_idx) if config.full_first_layer else N - n_cached
         rest = (N - n_cached + selected_cached) * (n_layers - 1)
         stats = {
             "tokens": N,

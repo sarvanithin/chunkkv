@@ -69,7 +69,7 @@ class ChunkReuseRuntime:
                 if d.action is GateAction.RECOMPUTE or entry is None:
                     continue
                 entry.hits += 1
-                placements.append(Placement(entry.kv, seg.start, d.ratio))
+                placements.append(Placement(entry.kv, seg.start, d.ratio, exact=d.action is GateAction.REUSE))
 
         cfg = self.gate.config
         naive = cfg.mode == "naive" or all(d.action is GateAction.REUSE for d in decisions)
@@ -120,7 +120,7 @@ class PrefixCacheRuntime:
         limit = (len(tokens) - 1) if logits_from is None else logits_from
         n, res = self._lcp(tokens)
         n = min(n, limit)
-        placements = [Placement(res.chunk(0, n), 0)] if res is not None and n > 0 else []
+        placements = [Placement(res.chunk(0, n), 0, exact=True)] if res is not None and n > 0 else []
         result = self.engine.prefill(tokens, placements, BlendConfig(full_first_layer=False), logits_from)
 
         self._seqs[self._next] = (tokens, result)
