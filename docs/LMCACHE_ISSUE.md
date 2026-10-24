@@ -1,6 +1,6 @@
-# Draft upstream issue: CacheBlend fails on vLLM 0.32 (packed K|V layout unsupported by layerwise/blend path)
+# Upstream issue: CacheBlend fails on vLLM 0.32 (packed K|V layout unsupported by layerwise/blend path)
 
-*Draft for [LMCache/LMCache](https://github.com/LMCache/LMCache/issues). Not yet filed.*
+*Filed as [LMCache/LMCache#6021](https://github.com/LMCache/LMCache/issues/6021).*
 
 ---
 
