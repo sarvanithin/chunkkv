@@ -251,6 +251,14 @@ recompute. On Qwen2.5-7B with exact-match RAG, 15% costs 7.8 points, and even 50
 1.7. Moved chunks attend to the wrong neighbours, and recomputing the high-deviation tokens
 only partly fixes that.
 
+**At 15%, selective recompute doesn't beat naive reuse on RAG.** Naive reuse (no repair)
+gets 93.1% and 15% recompute gets 92.2%, with overlapping CIs, while KL only moves from
+0.85 to 0.75. Recompute starts to pay off at 30–50%. Two explanations fit: either this RAG
+task barely needs cross-document attention, or layer-1 K/V deviation is a weak signal for
+choosing tokens. A multi-hop task, where the answer depends on two documents, would tell
+these apart. A query-aware selector (ProphetKV-style) is the published alternative to the
+deviation rule.
+
 **The gate.** On RAG, every hit is same-context, so the gate reduces to CacheBlend. On
 multi-agent traffic, it spends more compute on cross-agent hits and buys lower KL, a
 different point on the same curve rather than a better curve. A gate that wins outright
@@ -265,6 +273,12 @@ obvious candidate; calibrating it is future work.
 - **Quality metrics.** First-token KL and greedy agreement are strict proxies. Only RAG has
   task-level ground truth.
 - **One model family** (Qwen2.5, standard RoPE), one GPU type.
+- **Budget-overflow bug (fixed after v0.1.0).** When the recompute ratio was close to 1.0,
+  the pooled budget could exceed the eligible tokens, because sinks are already kept. The
+  overflow could then select uncomputed tokens from an exact-reuse chunk. None of the
+  published runs hit this case: the 50% P4 run has compute 1.0 and KL 0, so no exact
+  placements were present there. The budget is now capped, and
+  `test_full_budget_with_leading_exact_chunk` covers it.
 
 ## 8. Reproducing
 

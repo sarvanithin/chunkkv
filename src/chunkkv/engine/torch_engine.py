@@ -138,6 +138,8 @@ class TorchEngine:
                         pool[p.start:end] = True
                         budget += int(round(ratio * p.chunk.length))
                     chunk_stats.append({"start": p.start, "length": p.chunk.length, "rel_dev": rel, "escalated": escalated})
+                # Sinks are already kept, so cap the budget at what is left to select.
+                budget = min(budget, int((pool & ~keep).sum().item()))
                 if budget > 0:
                     top = torch.argsort(-torch.where(pool & ~keep, diff, torch.full_like(diff, -1.0)))[:budget]
                     keep[top] = True
@@ -146,6 +148,7 @@ class TorchEngine:
                 local = torch.full((N,), -1, dtype=torch.long, device=dev)
                 local[active] = torch.arange(len(active), device=dev)
                 sel = local[keep_abs]
+                assert bool((sel >= 0).all()), "selected a token that was never computed"
                 h, q, k, v = h[:, sel], q[:, :, sel], k[:, :, sel], v[:, :, sel]
                 active = keep_abs
 

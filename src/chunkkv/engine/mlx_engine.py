@@ -173,6 +173,8 @@ class MLXEngine:
                         pool[p.start : end] = True
                         budget += int(round(ratio * p.chunk.length))
                     chunk_stats.append({"start": p.start, "length": p.chunk.length, "rel_dev": rel, "escalated": escalated})
+                # Sinks are already kept, so cap the budget at what is left to select.
+                budget = min(budget, mx.sum(pool & ~keep).item())
                 if budget > 0:
                     top = mx.argsort(-mx.where(pool & ~keep, diff, -1.0))[:budget]
                     keep[top] = True

@@ -81,3 +81,19 @@ def test_exact_chunk_skips_layer0_and_blend_still_matches(eng, parts):
     out = eng.prefill(toks, pl, BlendConfig())
     assert _kl(ref, out.logits) < 1e-4
     assert out.stats["prefill_token_equiv"] == len(toks) - len(parts["a"])
+
+
+def test_full_budget_with_leading_exact_chunk(eng, parts):
+    # ratio=1.0 asks for more tokens than remain after the sinks; the overflow must not
+    # spill into the exact chunk at position 0, whose tokens were never computed.
+    first = eng.prefill(parts["a"] + parts["b"] + parts["q"])
+    chunk_a = first.chunk(0, len(parts["a"]))
+    other = eng.prefill(parts["sys"] + parts["b"] + parts["q"])
+    s = len(parts["sys"])
+    chunk_b = other.chunk(s, s + len(parts["b"]))
+    toks = parts["a"] + parts["b"] + parts["q"]
+    ref = eng.model(mx.array(toks)[None])[0, -1:]
+    pl = [Placement(chunk_a, 0, exact=True), Placement(chunk_b, len(parts["a"]), ratio=1.0)]
+    out = eng.prefill(toks, pl, BlendConfig())
+    assert _kl(ref, out.logits) < 1e-4
+    assert out.stats["prefill_token_equiv"] == len(toks) - len(parts["a"])
