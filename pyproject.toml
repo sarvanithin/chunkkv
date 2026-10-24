@@ -1,17 +1,43 @@
 [project]
 name = "chunkkv"
 version = "0.1.0"
-description = "Content-addressed, provenance-keyed KV cache reuse for RAG and agents (MLX)"
+description = "Non-prefix KV cache reuse for RAG and agents: CacheBlend-style selective recompute, provenance-keyed cache, reuse gate, and an agent-trace benchmark (MLX + PyTorch/CUDA)."
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
-    { name = "Nithin", email = "sarvanithin@gmail.com" }
+    { name = "Nithin Sarva", email = "sarvanithin@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = [
-    "mlx>=0.32.4",
-    "mlx-lm>=0.32.2",
-    "numpy>=2.5.4",
+keywords = [
+    "kv-cache", "llm-inference", "prefix-caching", "cacheblend", "rag", "llm-agents",
+    "mlx", "vllm", "lmcache", "prompt-caching",
 ]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=2.0",
+    "mlx>=0.32.4; sys_platform == 'darwin'",
+    "mlx-lm>=0.32.2; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "torch>=2.8",
+    "transformers>=4.56",
+]
+
+[project.urls]
+Repository = "https://github.com/sarvanithin/chunkkv"
+Report = "https://github.com/sarvanithin/chunkkv/blob/master/docs/REPORT.md"
+Issues = "https://github.com/sarvanithin/chunkkv/issues"
 
 [build-system]
 requires = ["uv_build>=0.9.5,<0.10.0"]
